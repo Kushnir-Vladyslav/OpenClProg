@@ -5,9 +5,14 @@ import org.lwjgl.opencl.*;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 
+import java.net.URL;
+import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
-import java.nio.LongBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.time.Instant;
 
 public class OpenClCode {
 
@@ -15,7 +20,8 @@ public class OpenClCode {
         org.lwjgl.system.Configuration.OPENCL_EXPLICIT_INIT.set(true);
         CL.create();
 
-        final int VECTOR_SIZE = 16_000_000; // Збільшено розмір
+
+        final int VECTOR_SIZE = 1_000_000; // Збільшено розмір
         final int LOCAL_WORK_SIZE = 256; // Оптимальний розмір локальної групи
 
         FloatBuffer aBuffer = MemoryUtil.memAllocFloat(VECTOR_SIZE);
@@ -33,34 +39,30 @@ public class OpenClCode {
             aBuffer.rewind();
             bBuffer.rewind();
 
-            // Розширений OpenCL kernel з локальною пам'яттю
-            String kernelSource =
-                    "__kernel void vector_add(__global const float *a, " +
-                            "                         __global const float *b, " +
-                            "                         __global float *result, " +
-                            "                         __local float *local_a, " +
-                            "                         __local float *local_b) {" +
-                            "    int gid = get_global_id(0);" +
-                            "    int lid = get_local_id(0);" +
-                            "    int group_size = get_local_size(0);" +
-
-                            "    // Завантаження даних в локальну пам'ять" +
-                            "    local_a[lid] = a[gid];" +
-                            "    local_b[lid] = b[gid];" +
-
-                            "    // Синхронізація локальної групи" +
-                            "    barrier(CLK_LOCAL_MEM_FENCE);" +
-
-                            "    // Додавання з використанням локальної пам'яті" +
-                            "    result[gid] = local_a[lid] + local_b[lid];" +
-                            "}";
-
             // Отримання платформ та пристроїв (без змін)
             IntBuffer platformCount = stack.mallocInt(1);
             CL10.clGetPlatformIDs(null, platformCount);
 
             PointerBuffer platforms = stack.mallocPointer(platformCount.get(0));
             CL10.clGetPlatformIDs(platforms, (IntBuffer) null);
+
+
+            // Отримання інформації про платформи
+            for (int i = 0; i < platformCount.get(0); i++) {
+                long platformId = platforms.get(i);
+
+                // Запитуємо розмір буфера для зберігання назви платформи
+                PointerBuffer sizeBuffer = stack.mallocPointer(1);
+                CL10.clGetPlatformInfo(platformId, CL10.CL_PLATFORM_NAME, (ByteBuffer) null, sizeBuffer);
+
+                // Створюємо буфер для зчитування назви
+                ByteBuffer nameBuffer = stack.malloc((int) sizeBuffer.get(0));
+                CL10.clGetPlatformInfo(platformId, CL10.CL_PLATFORM_NAME, nameBuffer, null);
+
+                // Перетворюємо буфер у строку
+                String platformName = MemoryUtil.memUTF8(nameBuffer);
+                System.out.println("Platform " + i + ": " + platformName);
+            }
 
             long platform = platforms.get(0);
 
@@ -101,30 +103,65 @@ public class OpenClCode {
             long clResultBuffer = CL10.clCreateBuffer(context, CL10.CL_MEM_WRITE_ONLY,
                     VECTOR_SIZE * Float.BYTES, null);
 
+            // Завантаження OpenCL kernel
+            long localMemSizeInfo = CL10.clGetDeviceInfo(device, CL10.CL_DEVICE_LOCAL_MEM_SIZE, (IntBuffer) null, (PointerBuffer) null );
+
+            URL URLKernelSource;
+            if (localMemSizeInfo > 0) {
+                URLKernelSource = getClass().getResource("KernelSource.cl");
+            } else {
+                URLKernelSource = getClass().getResource("KernelSourceWithoutLocalMemory.cl");
+            }
+
+            assert URLKernelSource != null;
+            String kernelSource = Files.readString(
+                    Paths.get(URLKernelSource.toURI()));
+
             // Компіляція та створення kernel
             long program = CL10.clCreateProgramWithSource(context, kernelSource, null);
             CL10.clBuildProgram(program, device, "", null, 0);
 
             long kernel = CL10.clCreateKernel(program, "vector_add", (IntBuffer) null);
 
+            // Перевірка чи правельно пройшла уомпіляція
+//            int buildStatus = CL10.clBuildProgram(program, device, "", null, 0);
+//            if (buildStatus != CL10.CL_SUCCESS) {
+//                // Отримання журналу компіляції
+//                PointerBuffer sizeBuffer = MemoryStack.stackMallocPointer(1);
+//                CL10.clGetProgramBuildInfo(program, device, CL10.CL_PROGRAM_BUILD_LOG, (ByteBuffer) null, sizeBuffer);
+//
+//                ByteBuffer buildLogBuffer = MemoryStack.stackMalloc((int) sizeBuffer.get(0));
+//                CL10.clGetProgramBuildInfo(program, device, CL10.CL_PROGRAM_BUILD_LOG, buildLogBuffer, null);
+//
+//                String buildLog = MemoryUtil.memUTF8(buildLogBuffer);
+//                System.err.println("Build log:\n" + buildLog);
+//                throw new RuntimeException("Failed to build OpenCL program.");
+//            }
+
             // Локальна пам'ять
             long localMemSize = LOCAL_WORK_SIZE * Float.BYTES * 2;
 
+            //валідація обєктів OpenCl
+            if (clABuffer == 0 || clBBuffer == 0 || clResultBuffer == 0) {
+                throw new IllegalStateException("Failed to create OpenCL memory buffers.");
+            }
+            if (kernel == 0) {
+                throw new IllegalStateException("Failed to create OpenCL kernel.");
+            }
+            if (context == 0 || commandQueue == 0) {
+                throw new IllegalStateException("Failed to create OpenCL context or command queue.");
+            }
+
             // Встановлення аргументів
-            LongBuffer clMemBuffer = stack.mallocLong(1);
-
-            clMemBuffer.put(0, clABuffer);
-            CL10.clSetKernelArg(kernel, 0, clMemBuffer);
-
-            clMemBuffer.put(0, clBBuffer);
-            CL10.clSetKernelArg(kernel, 1, clMemBuffer);
-
-            clMemBuffer.put(0, clResultBuffer);
-            CL10.clSetKernelArg(kernel, 2, clMemBuffer);
+            CL10.clSetKernelArg(kernel, 0, PointerBuffer.allocateDirect(1).put(0, clABuffer));
+            CL10.clSetKernelArg(kernel, 1, PointerBuffer.allocateDirect(1).put(0, clBBuffer));
+            CL10.clSetKernelArg(kernel, 2, PointerBuffer.allocateDirect(1).put(0, clResultBuffer));
 
             // Локальна пам'ять як аргументи
-            CL10.clSetKernelArg(kernel, 3, localMemSize);
-            CL10.clSetKernelArg(kernel, 4, localMemSize);
+            if (localMemSizeInfo > 0) {
+                CL10.clSetKernelArg(kernel, 3, localMemSize);
+                CL10.clSetKernelArg(kernel, 4, localMemSize);
+            }
 
             // Виконання kernel з явним розміром локальної групи
             long globalWorkSize = (long) Math.ceil(VECTOR_SIZE / (float) LOCAL_WORK_SIZE) * LOCAL_WORK_SIZE;
@@ -132,24 +169,28 @@ public class OpenClCode {
             PointerBuffer global = stack.mallocPointer(1).put(globalWorkSize).rewind();
             PointerBuffer local = stack.mallocPointer(1).put(LOCAL_WORK_SIZE).rewind();
 
+            Main.start = Instant.now();
+
             CL10.clEnqueueNDRangeKernel(
                     commandQueue, kernel, 1, null,
                     global, local,
                     null, null
             );
 
+            Main.end = Instant.now();
+
             // Читання результату
             CL10.clEnqueueReadBuffer(commandQueue, clResultBuffer, true, 0,
                     resultBuffer, null, null);
 
-            long endTime = System.nanoTime();
-            System.out.printf("Час виконання: %.3f мс%n", (endTime - startTime) / 1_000_000.0);
-
-            // Перевірка результату
-            for (int i = 0; i < 10; i++) {
-                System.out.printf("%.2f + %.2f = %.2f%n",
-                        aBuffer.get(i), bBuffer.get(i), resultBuffer.get(i));
-            }
+//            long endTime = System.nanoTime();
+//            System.out.printf("Час виконання: %.3f мс%n", (endTime - startTime) / 1_000_000.0);
+//
+//            // Перевірка результату
+//            for (int i = 0; i < 10; i++) {
+//                System.out.printf("%.2f + %.2f = %.2f%n",
+//                        aBuffer.get(i), bBuffer.get(i), resultBuffer.get(i));
+//            }
 
             // Очищення ресурсів (без змін)
             CL10.clReleaseKernel(kernel);
