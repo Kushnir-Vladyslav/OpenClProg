@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.time.Instant;
+import static org.example.Main.VECTOR_SIZE;
 
 public class OpenClCode {
 
@@ -21,7 +22,6 @@ public class OpenClCode {
         CL.create();
 
 
-        final int VECTOR_SIZE = 1_000_000; // Збільшено розмір
         final int LOCAL_WORK_SIZE = 256; // Оптимальний розмір локальної групи
 
         FloatBuffer aBuffer = MemoryUtil.memAllocFloat(VECTOR_SIZE);
@@ -186,7 +186,7 @@ public class OpenClCode {
 //            long endTime = System.nanoTime();
 //            System.out.printf("Час виконання: %.3f мс%n", (endTime - startTime) / 1_000_000.0);
 //
-//            // Перевірка результату
+            // Перевірка результату
 //            for (int i = 0; i < 10; i++) {
 //                System.out.printf("%.2f + %.2f = %.2f%n",
 //                        aBuffer.get(i), bBuffer.get(i), resultBuffer.get(i));
